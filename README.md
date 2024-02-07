@@ -1,2 +1,3 @@
 # lwproxy
-A lightweight proxy
+
+A lightweight http proxy
