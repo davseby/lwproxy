@@ -1,7 +1,6 @@
 package control
 
 import (
-	"errors"
 	"sync"
 
 	"golang.org/x/exp/slog"
@@ -31,12 +30,12 @@ func NewLimiter(log *slog.Logger, maxBytes int64) *Limiter {
 
 // UseBytes uses the given amount of bytes and returns true if the limiter
 // hasn't reached a limit.
-func (l *Limiter) UseBytes(bytes int64) error {
+func (l *Limiter) UseBytes(bytes int64) bool {
 	l.bytes.mu.Lock()
 	defer l.bytes.mu.Unlock()
 
 	if !l.hasAvailableBytes(bytes + l.bytes.used) {
-		return errors.New("bytes limit reached")
+		return false
 	}
 
 	l.bytes.used += bytes
@@ -45,7 +44,7 @@ func (l *Limiter) UseBytes(bytes int64) error {
 		With("max", l.bytes.max).
 		Debug("used bytes")
 
-	return nil
+	return true
 }
 
 // hasAvailableBytes returns true if the limiter hasn't reached a limit.
