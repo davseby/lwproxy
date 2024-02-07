@@ -46,11 +46,7 @@ func startServices(logger *slog.Logger) (func(), error) {
 		defer wg.Done()
 
 		for ctx.Err() == nil {
-			err := server.ListenAndServe(ctx)
-			if err != nil {
-				logger.With(err).
-					Error("starting server")
-			}
+			server.ListenAndServe(ctx)
 		}
 	}()
 
