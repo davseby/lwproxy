@@ -7,32 +7,38 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/davseby/lwproxy/internal/request/storage/memory"
 	"github.com/davseby/lwproxy/internal/server"
+	"github.com/davseby/lwproxy/internal/server/control"
 	"golang.org/x/exp/slog"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
-	defer logger.Info("application shutdown")
+	defer log.Info("application shutdown")
 
-	stop, err := startServices(logger)
+	stop, err := startServices(log)
 	if err != nil {
-		logger.With("error", err).
+		log.With("error", err).
 			Error("starting services")
 		return
 	}
 	defer stop()
 
-	trapInstance(logger)
+	trapInstance(log)
 }
 
 // startServices starts the application services.
-func startServices(logger *slog.Logger) (func(), error) {
+func startServices(log *slog.Logger) (func(), error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	server, err := server.NewServer(logger)
+	server, err := server.NewServer(
+		log,
+		control.NewLimiter(log, 1<<15),
+		memory.NewHub(log),
+	)
 	if err != nil {
 		cancel()
 		return nil, err

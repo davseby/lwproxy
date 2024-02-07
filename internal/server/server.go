@@ -3,34 +3,46 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"time"
 
+	"github.com/davseby/lwproxy/internal/request"
 	"golang.org/x/exp/slog"
 )
 
-// _closeTimeout is the timeout for closing the server.
-const _closeTimeout = 5 * time.Second
+const (
+	// _closeTimeout is the timeout for closing the server.
+	_closeTimeout = 5 * time.Second
+
+	// _targetDialTimeout is the timeout for dialing the target.
+	_targetDialTimeout = 10 * time.Second
+
+	// _connectionDeadline is the deadline for a connection.
+	_connectionDeadline = 2 * time.Hour
+)
 
 // Server is a server.
 type Server struct {
-	logger *slog.Logger
+	log *slog.Logger
 
-	server *http.Server
-	client *http.Client
+	srv *http.Server
+	bl  BandwidthLimiter
+	rb  RecordPublisher
 }
 
-// NewServer creates a new server.
-func NewServer(logger *slog.Logger) (*Server, error) {
+// NewServer creates a new proxy server.
+func NewServer(
+	log *slog.Logger,
+	bl BandwidthLimiter,
+	rb RecordPublisher,
+) (*Server, error) {
 	s := &Server{
-		logger: logger.With("thread", "server"),
-		client: http.DefaultClient,
+		log: log.With("thread", "server"),
+		bl:  bl,
+		rb:  rb,
 	}
 
-	s.server = &http.Server{
+	s.srv = &http.Server{
 		Addr:    ":8080",
 		Handler: s,
 	}
@@ -38,32 +50,32 @@ func NewServer(logger *slog.Logger) (*Server, error) {
 	return s, nil
 }
 
-// ListenAndServe listens for and serves connections.
+// ListenAndServe listens for and serves connections. It blocks until the
+// context is done or server listening procedure returns an error.
 func (s *Server) ListenAndServe(ctx context.Context) {
+	// NOTE: By having stop channel we can retry opening a server in case
+	// the ListenAndServe method fails.
 	stopCh := make(chan struct{})
 
-	// NOTE: In case we need to exit due to application shutdown, we need
-	// to close the server and return the error.
 	go func() {
 		defer close(stopCh)
 
-		err := s.server.ListenAndServe()
-		if err != nil && errors.Is(err, http.ErrServerClosed) {
-			s.logger.With("error", err).
+		err := s.srv.ListenAndServe()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.log.With("error", err).
 				Error("listening and serving")
 		}
 	}()
 
 	select {
 	case <-stopCh:
-		return
 	case <-ctx.Done():
 		closureCtx, closureCancel := context.WithTimeout(context.Background(), _closeTimeout)
 		defer closureCancel()
 
-		err := s.server.Shutdown(closureCtx)
+		err := s.srv.Shutdown(closureCtx)
 		if err != nil {
-			s.logger.With("error", err).
+			s.log.With("error", err).
 				Error("shutting down server")
 		}
 
@@ -71,194 +83,44 @@ func (s *Server) ListenAndServe(ctx context.Context) {
 	}
 }
 
-// ServeHTTP serves HTTP.
+// ServeHTTP serves HTTP requests.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.logger.Info("serving http")
+	if !s.bl.UseBytes(r.ContentLength) {
+		http.Error(w, "bandwidth limit reached", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	ctx, cancel := context.WithDeadline(r.Context(), time.Now().Add(_connectionDeadline))
+	defer cancel()
+
+	// NOTE: We publish a request record before handling the request.
+	// This could be done in a separate goroutine to avoid blocking the
+	// request handling as we don't know what will be done in the publish
+	// method. However, in that case we should track the number
+	// of spinned go routines and keep a limit on them. Other solution
+	// could be to use a buffered channel communication. In case we publish
+	// directly to a message broker, we should be able to avoid these
+	// problems, except for the error handling.
+	s.rb.Publish(request.NewRecord(r.Host, time.Now()))
 
 	if r.Method == http.MethodConnect {
-		s.handleTunneling(w, r)
+		s.handleTunneling(w, r.WithContext(ctx))
 		return
 	}
 
-	s.handleHTTPRequest(w, r)
-	//switch r.URL.Scheme {
-	//case "http":
-	//case "https":
-	//	http.Error(w, "https is not supported", http.StatusInternalServerError)
-	//}
+	s.handleRequest(w, r.WithContext(ctx))
 }
 
-func (s *Server) handleTunneling(w http.ResponseWriter, r *http.Request) {
-	dest_conn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-
-	fmt.Println("handled tunneling")
-
-	w.WriteHeader(http.StatusOK)
-
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-		return
-	}
-
-	client_conn, _, err := hijacker.Hijack()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-	}
-
-	go negiotateCommunication(dest_conn, client_conn)
-	go negiotateCommunication(client_conn, dest_conn)
-
+// BandwidthLimiter is a bandwidth limiter.
+type BandwidthLimiter interface {
+	// UseBytes should use the given number of bytes from the limit.
+	// It should return a boolean indicating if the byte limit hasn't
+	// been reached.
+	UseBytes(n int64) bool
 }
 
-func (s *Server) handleHTTPRequest(w http.ResponseWriter, r *http.Request) {
-	// NOTE: RequestURI is empty to avoid request loop.
-	r.RequestURI = ""
-
-	s.logger.With("scheme", r.URL.Scheme).
-		With("url", r.URL.String()).Info("received request")
-
-	r.URL.Scheme = "https"
-
-	fmt.Println("#v", r)
-
-	resp, err := s.client.Do(r)
-	if err != nil {
-		s.logger.With("error", err).
-			Error("sending request")
-
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-
-		return
-	}
-	defer resp.Body.Close()
-
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-
-	w.WriteHeader(resp.StatusCode)
-
-	io.Copy(w, resp.Body)
-}
-
-// handleConnection handles a connection.
-//
-//	func (s *Server) handleConnection(ctx context.Context, baseConn net.Conn) {
-//		targetConn, req, err := dialTarget(baseConn)
-//		if err != nil {
-//			s.logger.With("error", err).
-//				Error("setting up target")
-//
-//			err := baseConn.Close()
-//			if err != nil && !errors.Is(err, net.ErrClosed) {
-//				s.logger.With("error", err).
-//					Error("closing base connection")
-//			}
-//
-//			return
-//		}
-//
-//		s.logger.With("request", req.URL.Host).Info("handling connection")
-//
-//		closeConnections := func() {
-//			err := targetConn.Close()
-//			if err != nil && !errors.Is(err, net.ErrClosed) {
-//				s.logger.With("error", err).
-//					Error("closing target connection")
-//			}
-//
-//			err = baseConn.Close()
-//			if err != nil && !errors.Is(err, net.ErrClosed) {
-//				s.logger.With("error", err).
-//					Error("closing base connection")
-//			}
-//		}
-//
-//		var wg sync.WaitGroup
-//
-//		wg.Add(1)
-//
-//		go func() {
-//			defer wg.Done()
-//
-//			err := negiotateCommunication(ctx, baseConn, targetConn)
-//			if err != nil {
-//				s.logger.With("error", err).
-//					Error("negiotating communication")
-//			}
-//
-//			closeConnections()
-//		}()
-//
-//		wg.Add(1)
-//
-//		go func() {
-//			defer wg.Done()
-//
-//			err := negiotateCommunication(ctx, targetConn, baseConn)
-//			if err != nil {
-//				s.logger.With("error", err).
-//					Error("negiotating communication")
-//			}
-//
-//			closeConnections()
-//		}()
-//
-//		wg.Wait()
-//
-//		s.logger.With("request", req.URL.Host).Info("connection handled")
-//	}
-//
-// // dialTarget sets up the target connection.
-//
-//	func dialTarget(baseConn net.Conn) (net.Conn, *http.Request, error) {
-//		buf := make([]byte, 65535)
-//
-//		n, err := baseConn.Read(buf)
-//		if err != nil {
-//			return nil, nil, fmt.Errorf("reading initial request: %w", err)
-//		}
-//
-//		req, err := http.ReadRequest(
-//			bufio.NewReader(
-//				bytes.NewBuffer(buf[:n]),
-//			),
-//		)
-//		if err != nil {
-//			return nil, nil, fmt.Errorf("deriving target: %w", err)
-//		}
-//
-//		targetConn, err := net.DialTimeout("tcp", req.URL.Host, time.Second*5)
-//		if err != nil {
-//			return nil, nil, fmt.Errorf("dialing target: %w", err)
-//		}
-//
-//		rbuf := make([]byte, 65535)
-//
-//		err = req.Write(bytes.NewBuffer(rbuf))
-//		if err != nil {
-//			return nil, nil, fmt.Errorf("writing initial request: %w", err)
-//		}
-//
-//		_, err = targetConn.Write(rbuf[:n])
-//		if err != nil {
-//			return nil, nil, fmt.Errorf("writing initial request: %w", err)
-//		}
-//
-//		return targetConn, req, nil
-//	}
-//
-// negiotateCommunication negiotates communication between source and
-// destination connections.
-func negiotateCommunication(src, dst net.Conn) error {
-	io.Copy(dst, src)
-
-	return nil
+// RecordPublisher is a record publisher.
+type RecordPublisher interface {
+	// Publish should publish a request record.
+	Publish(rec request.Record) error
 }
