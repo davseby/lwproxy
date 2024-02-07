@@ -1,0 +1,82 @@
+run:
+  tests: true
+  allow-parallel-runners: false
+
+output:
+  sort-results: true
+
+linters:
+  enable:
+    - asasalint
+    - bodyclose
+    - contextcheck
+    - dupword
+    - durationcheck
+    - errchkjson
+    - errcheck
+    - errname
+    - errorlint
+    - execinquery
+    - exportloopref
+    - forcetypeassert
+    - gochecknoinits
+    - goconst
+    - gocritic
+    - godot
+    - gofmt
+    - goimports
+    - gosec
+    - gosmopolitan
+    - govet
+    - importas
+    - ineffassign
+    - ireturn
+    - makezero
+    - mirror
+    - misspell
+    - nakedret
+    - nilerr
+    - nilnil
+    - noctx
+    - nolintlint
+    - perfsprint
+    - prealloc
+    - predeclared
+    - reassign
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - typecheck
+    - unconvert
+    - unused
+    - unparam
+    - usestdlibvars
+    - wastedassign
+    - whitespace
+    - wsl
+
+linters-settings:
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - experimental
+      - opinionated
+      - performance
+      - style
+    disabled-checks:
+      - hugeParam
+      - sloppyReassign
+      - whyNoLint
+      - rangeValCopy
+      - unnamedResult
+  wsl:
+    enforce-err-cuddling: true
+  whitespace:
+    multi-if: true
+
+issues:
+  exclude-rules:
+    - text: multi-line statement should be followed by a newline # this is clashing with wsl
+      linters:
+        - whitespace
