@@ -3,10 +3,18 @@ package request
 import (
 	"strings"
 	"time"
+
+	"github.com/rs/xid"
 )
 
 // Record is a record of a request.
 type Record struct {
+	// ID is the unique identifier of the request.
+	ID xid.ID
+
+	// Scheme is the scheme of the request.
+	Scheme string
+
 	// Host is the host of the request.
 	Host string
 
@@ -15,9 +23,10 @@ type Record struct {
 }
 
 // NewRecord creates a new request record.
-func NewRecord(host string, createdAt time.Time) Record {
+func NewRecord(host string) Record {
 	return Record{
+		ID:        xid.New(),
 		Host:      strings.Split(host, ":")[0],
-		CreatedAt: createdAt,
+		CreatedAt: time.Now(),
 	}
 }
