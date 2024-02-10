@@ -1,3 +1,4 @@
+// package proxy provides a proxy server implementation for the proxy service.
 package proxy
 
 import (
@@ -36,8 +37,8 @@ type Proxy struct {
 	rec     Recorder
 	limiter intercept.BytesLimiter
 
-	cfg          ProxyConfig
-	controlPoint *intercept.ControlPoint
+	cfg     ProxyConfig
+	control *intercept.Control
 }
 
 // ProxyConfig holds the settings for the proxy server.
@@ -69,11 +70,11 @@ func NewProxy(
 	}
 
 	p := &Proxy{
-		log:          log.With("job", "proxy"),
-		rec:          rec,
-		cfg:          cfg,
-		limiter:      bl,
-		controlPoint: intercept.NewControlPoint(),
+		log:     log.With("job", "proxy"),
+		rec:     rec,
+		cfg:     cfg,
+		limiter: bl,
+		control: intercept.NewControl(),
 	}
 
 	p.srv = &http.Server{
@@ -93,14 +94,14 @@ func (p *Proxy) ListenAndServe(ctx context.Context) {
 
 	go func() {
 		defer func() {
-			p.controlPoint.Clean()
+			p.control.Clean()
 			close(stopCh)
 		}()
 
 		il, err := intercept.NewListener(
 			p.srv.Addr,
 			p.limiter,
-			p.controlPoint,
+			p.control,
 		)
 		if err != nil {
 			p.log.Error("creating listener", slog.String("error", err.Error()))
@@ -152,7 +153,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// message, we need to allow the initial request data to be read. This
 	// check is critical as if we don't use this, the client will be able
 	// to use as much traffic as it wants, without it being logged.
-	if p.controlPoint.HasRemove(r.RemoteAddr) {
+	if p.control.HasRemove(r.RemoteAddr) {
 		http.Error(w, "bytes limit exceeded", http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -192,21 +193,8 @@ func (p *Proxy) handleAuth(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 
-	resp := http.Response{
-		StatusCode: http.StatusProxyAuthRequired,
-		Header: http.Header{
-			"Proxy-Authenticate": []string{
-				"Basic realm=\"lwproxy\"",
-			},
-		},
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-	}
-
-	err := resp.Write(w)
-	if err != nil {
-		p.log.Error("writing authentication response", slog.String("error", err.Error()))
-	}
+	w.Header().Set("Proxy-Authenticate", "Basic")
+	w.WriteHeader(http.StatusProxyAuthRequired)
 
 	return false
 }

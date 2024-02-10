@@ -1,3 +1,5 @@
+// package request contains necessary types and functions to handle proxy
+// requests logging and processing.
 package request
 
 import (

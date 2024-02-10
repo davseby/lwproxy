@@ -12,14 +12,14 @@ func Test_NewListener(t *testing.T) {
 	blm := &BytesLimiterMock{}
 
 	// error
-	l, err := NewListener("9999", blm, &ControlPoint{
+	l, err := NewListener("9999", blm, &Control{
 		conns: make(map[string]struct{}),
 	})
 	require.Error(t, err)
 	assert.Nil(t, l)
 
 	// success
-	l, err = NewListener(":9999", blm, &ControlPoint{
+	l, err = NewListener(":9999", blm, &Control{
 		conns: make(map[string]struct{}),
 	})
 	require.Empty(t, err)
@@ -54,10 +54,10 @@ func Test_Listener_Accept(t *testing.T) {
 		}
 	}
 
-	type check func(*testing.T, *listenerMock, *connMock, *BytesLimiterMock, *ControlPoint)
+	type check func(*testing.T, *listenerMock, *connMock, *BytesLimiterMock, *Control)
 
 	wasListenerAcceptCalled := func(called bool) check {
-		return func(t *testing.T, l *listenerMock, _ *connMock, _ *BytesLimiterMock, _ *ControlPoint) {
+		return func(t *testing.T, l *listenerMock, _ *connMock, _ *BytesLimiterMock, _ *Control) {
 			if called {
 				assert.Len(t, l.AcceptCalls(), 1)
 				return
@@ -68,29 +68,29 @@ func Test_Listener_Accept(t *testing.T) {
 	}
 
 	wasCheckBytesCalled := func(called bool) check {
-		return func(t *testing.T, _ *listenerMock, _ *connMock, bl *BytesLimiterMock, _ *ControlPoint) {
+		return func(t *testing.T, _ *listenerMock, _ *connMock, lim *BytesLimiterMock, _ *Control) {
 			if called {
-				assert.Len(t, bl.CheckBytesCalls(), 1)
+				assert.Len(t, lim.CheckBytesCalls(), 1)
 				return
 			}
 
-			assert.Len(t, bl.CheckBytesCalls(), 0)
+			assert.Len(t, lim.CheckBytesCalls(), 0)
 		}
 	}
 
 	wasControlPointAddCalled := func(called bool, remoteAddr string) check {
-		return func(t *testing.T, _ *listenerMock, _ *connMock, _ *BytesLimiterMock, cp *ControlPoint) {
+		return func(t *testing.T, _ *listenerMock, _ *connMock, _ *BytesLimiterMock, c *Control) {
 			if called {
-				assert.Contains(t, cp.conns, remoteAddr)
+				assert.Contains(t, c.conns, remoteAddr)
 				return
 			}
 
-			assert.Empty(t, cp.conns)
+			assert.Empty(t, c.conns)
 		}
 	}
 
 	wasConnRemoteAddrCalled := func(called bool) check {
-		return func(t *testing.T, _ *listenerMock, c *connMock, _ *BytesLimiterMock, _ *ControlPoint) {
+		return func(t *testing.T, _ *listenerMock, c *connMock, _ *BytesLimiterMock, _ *Control) {
 			if called {
 				assert.Len(t, c.RemoteAddrCalls(), 1)
 				return
@@ -101,24 +101,24 @@ func Test_Listener_Accept(t *testing.T) {
 	}
 
 	type tcase struct {
-		Listener     *listenerMock
-		Limiter      *BytesLimiterMock
-		ControlPoint *ControlPoint
-		Error        error
-		Conn         *connMock
-		SkipCheck    bool
-		Checks       []check
+		Listener  *listenerMock
+		Limiter   *BytesLimiterMock
+		Control   *Control
+		Error     error
+		Conn      *connMock
+		SkipCheck bool
+		Checks    []check
 	}
 
 	tests := map[string]tcase{
 		"listener.Accept returns an error": func() tcase {
 			cm := stubConn("127.0.0.1")
-			bl := stubBytesLimiter(false, nil)
+			lim := stubBytesLimiter(false, nil)
 
 			return tcase{
 				Listener: stubListener(nil, assert.AnError),
-				Limiter:  bl,
-				ControlPoint: &ControlPoint{
+				Limiter:  lim,
+				Control: &Control{
 					conns: make(map[string]struct{}),
 				},
 				Error: assert.AnError,
@@ -133,12 +133,12 @@ func Test_Listener_Accept(t *testing.T) {
 		}(),
 		"limiter.CheckBytes returns an error": func() tcase {
 			cm := stubConn("127.0.0.1")
-			bl := stubBytesLimiter(false, assert.AnError)
+			lim := stubBytesLimiter(false, assert.AnError)
 
 			return tcase{
 				Listener: stubListener(cm, nil),
-				Limiter:  bl,
-				ControlPoint: &ControlPoint{
+				Limiter:  lim,
+				Control: &Control{
 					conns: make(map[string]struct{}),
 				},
 				Error: assert.AnError,
@@ -151,14 +151,14 @@ func Test_Listener_Accept(t *testing.T) {
 				},
 			}
 		}(),
-		"Successfully accepted a connection, however it was added to a control point": func() tcase {
+		"Successfully accepted a connection, however it was added to a control": func() tcase {
 			cm := stubConn("127.0.0.1")
-			bl := stubBytesLimiter(false, nil)
+			lim := stubBytesLimiter(false, nil)
 
 			return tcase{
 				Listener: stubListener(cm, nil),
-				Limiter:  bl,
-				ControlPoint: &ControlPoint{
+				Limiter:  lim,
+				Control: &Control{
 					conns: make(map[string]struct{}),
 				},
 				Conn:      cm,
@@ -173,12 +173,12 @@ func Test_Listener_Accept(t *testing.T) {
 		}(),
 		"Successfully accepted a connection": func() tcase {
 			cm := stubConn("127.0.0.1")
-			bl := stubBytesLimiter(true, nil)
+			lim := stubBytesLimiter(true, nil)
 
 			return tcase{
 				Listener: stubListener(cm, nil),
-				Limiter:  bl,
-				ControlPoint: &ControlPoint{
+				Limiter:  lim,
+				Control: &Control{
 					conns: make(map[string]struct{}),
 				},
 				Conn:      cm,
@@ -198,15 +198,15 @@ func Test_Listener_Accept(t *testing.T) {
 			t.Parallel()
 
 			l := &Listener{
-				listener:     test.Listener,
-				limiter:      test.Limiter,
-				controlPoint: test.ControlPoint,
+				listener: test.Listener,
+				limiter:  test.Limiter,
+				control:  test.Control,
 			}
 
 			conn, err := l.Accept()
 
 			for _, check := range test.Checks {
-				check(t, test.Listener, test.Conn, test.Limiter, test.ControlPoint)
+				check(t, test.Listener, test.Conn, test.Limiter, test.Control)
 			}
 
 			if test.Error != nil {
@@ -252,14 +252,14 @@ func Test_Conn_Read(t *testing.T) {
 	}
 
 	wasBytesLimiterUseBytesCalled := func(called bool, size int64) check {
-		return func(t *testing.T, _ *connMock, bl *BytesLimiterMock) {
+		return func(t *testing.T, _ *connMock, lim *BytesLimiterMock) {
 			if called {
-				assert.Len(t, bl.UseBytesCalls(), 1)
-				assert.Equal(t, size, bl.UseBytesCalls()[0].N)
+				assert.Len(t, lim.UseBytesCalls(), 1)
+				assert.Equal(t, size, lim.UseBytesCalls()[0].N)
 				return
 			}
 
-			assert.Len(t, bl.UseBytesCalls(), 0)
+			assert.Len(t, lim.UseBytesCalls(), 0)
 		}
 	}
 

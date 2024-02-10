@@ -1,3 +1,5 @@
+// packe stdout implements a request processor that uses standard output to
+// log requests.
 package stdout
 
 import (

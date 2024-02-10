@@ -13,15 +13,15 @@ import (
 type Listener struct {
 	listener
 
-	limiter      BytesLimiter
-	controlPoint *ControlPoint
+	limiter BytesLimiter
+	control *Control
 }
 
 // NewListener intercepts the listen call.
 func NewListener(
 	addr string,
 	limiter BytesLimiter,
-	controlPoint *ControlPoint,
+	control *Control,
 ) (*Listener, error) {
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -29,9 +29,9 @@ func NewListener(
 	}
 
 	return &Listener{
-		listener:     l,
-		limiter:      limiter,
-		controlPoint: controlPoint,
+		listener: l,
+		limiter:  limiter,
+		control:  control,
 	}, nil
 }
 
@@ -49,7 +49,7 @@ func (l *Listener) Accept() (net.Conn, error) {
 	}
 
 	if !ok {
-		l.controlPoint.Add(conn.RemoteAddr().String())
+		l.control.Add(conn.RemoteAddr().String())
 	}
 
 	return &Conn{

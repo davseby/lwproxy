@@ -1,3 +1,4 @@
+// package memory implements an in memory database for the proxy service.
 package memory
 
 import (
