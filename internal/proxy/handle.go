@@ -8,52 +8,27 @@ import (
 	"sync"
 )
 
-// httpHandler handles a basic HTTP requests.
-func (p *Proxy) httpHandler(w http.ResponseWriter, r *http.Request) {
-	resp, err := http.DefaultTransport.RoundTrip(r)
-	if err != nil {
-		http.Error(w, "target service is unreachable", http.StatusServiceUnavailable)
-		return
-	}
-	defer resp.Body.Close()
-
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-
-	w.WriteHeader(resp.StatusCode)
-
-	deadline, ok := r.Context().Deadline()
-	if ok {
-		err := http.NewResponseController(w).SetWriteDeadline(deadline) //nolint: bodyclose // we cannot close the body here, seems like a linter issue.
-		if err != nil {
-			p.silentError(err, "setting response write deadline")
-		}
-	}
-
-	_, err = io.Copy(w, resp.Body)
-	if err != nil {
-		p.silentError(err, "handling request communication")
-	}
-}
-
-// tunnelingHandler handles tunneling. This is most commonly used for HTTPS
-// requests, where first request is for the proxy to establish a connection
-// to the target server and then forward the data between the client and
-// the target server.
-func (p *Proxy) tunnelingHandler(w http.ResponseWriter, r *http.Request) {
+// tunnelingHandler handles tunneling (e.g proxying).
+func (p *Proxy) tunnelingHandler(w http.ResponseWriter, r *http.Request, secure bool) {
 	targetConn, err := net.DialTimeout("tcp", r.Host, _targetDialTimeout)
 	if err != nil {
 		http.Error(w, "target service is unreachable", http.StatusServiceUnavailable)
 		return
 	}
 
-	// NOTE: We need to write the status header before hijacking the
-	// connection. This will tell the client that we've established the
-	// connection between the client and the target server.
-	w.WriteHeader(http.StatusOK)
+	if secure {
+		// NOTE: We need to write the status header before hijacking the
+		// connection. This will tell the client that we've established the
+		// connection between the client and the target server. Used
+		// for TLS.
+		w.WriteHeader(http.StatusOK)
+	} else {
+		err = r.Write(targetConn)
+		if err != nil {
+			http.Error(w, "writing request to the target service", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {

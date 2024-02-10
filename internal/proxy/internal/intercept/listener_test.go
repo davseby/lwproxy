@@ -1,30 +1,32 @@
 package intercept
 
 import (
+	"bytes"
+	"io"
 	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/exp/slog"
 )
 
 func Test_NewListener(t *testing.T) {
 	blm := &BytesLimiterMock{}
 
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
 	// error
-	l, err := NewListener("9999", blm, &Control{
-		conns: make(map[string]struct{}),
-	})
+	l, err := NewListener(log, "9999", blm)
 	require.Error(t, err)
 	assert.Nil(t, l)
 
 	// success
-	l, err = NewListener(":9999", blm, &Control{
-		conns: make(map[string]struct{}),
-	})
+	l, err = NewListener(log, ":9999", blm)
 	require.Empty(t, err)
 	require.NotNil(t, l)
 	assert.Same(t, blm, l.limiter)
+	assert.Equal(t, log.With("job", "intercept-listener"), l.log)
 }
 
 func Test_Listener_Accept(t *testing.T) {
@@ -36,12 +38,13 @@ func Test_Listener_Accept(t *testing.T) {
 		}
 	}
 
-	stubConn := func(remoteAddr string) *connMock {
+	stubConn := func(werr, cerr error) *connMock {
 		return &connMock{
-			RemoteAddrFunc: func() net.Addr {
-				return &net.IPAddr{
-					IP: net.ParseIP(remoteAddr),
-				}
+			WriteFunc: func(n []byte) (int, error) {
+				return len(n), werr
+			},
+			CloseFunc: func() error {
+				return cerr
 			},
 		}
 	}
@@ -54,10 +57,10 @@ func Test_Listener_Accept(t *testing.T) {
 		}
 	}
 
-	type check func(*testing.T, *listenerMock, *connMock, *BytesLimiterMock, *Control)
+	type check func(*testing.T, *listenerMock, *connMock, *BytesLimiterMock)
 
 	wasListenerAcceptCalled := func(called bool) check {
-		return func(t *testing.T, l *listenerMock, _ *connMock, _ *BytesLimiterMock, _ *Control) {
+		return func(t *testing.T, l *listenerMock, _ *connMock, _ *BytesLimiterMock) {
 			if called {
 				assert.Len(t, l.AcceptCalls(), 1)
 				return
@@ -68,7 +71,7 @@ func Test_Listener_Accept(t *testing.T) {
 	}
 
 	wasCheckBytesCalled := func(called bool) check {
-		return func(t *testing.T, _ *listenerMock, _ *connMock, lim *BytesLimiterMock, _ *Control) {
+		return func(t *testing.T, _ *listenerMock, _ *connMock, lim *BytesLimiterMock) {
 			if called {
 				assert.Len(t, lim.CheckBytesCalls(), 1)
 				return
@@ -78,116 +81,168 @@ func Test_Listener_Accept(t *testing.T) {
 		}
 	}
 
-	wasControlPointAddCalled := func(called bool, remoteAddr string) check {
-		return func(t *testing.T, _ *listenerMock, _ *connMock, _ *BytesLimiterMock, c *Control) {
-			if called {
-				assert.Contains(t, c.conns, remoteAddr)
-				return
-			}
-
-			assert.Empty(t, c.conns)
+	wasConnWriteCalled := func(calls int) check {
+		return func(t *testing.T, _ *listenerMock, c *connMock, _ *BytesLimiterMock) {
+			assert.Len(t, c.WriteCalls(), calls)
 		}
 	}
 
-	wasConnRemoteAddrCalled := func(called bool) check {
-		return func(t *testing.T, _ *listenerMock, c *connMock, _ *BytesLimiterMock, _ *Control) {
+	wasConnCloseCalled := func(called bool) check {
+		return func(t *testing.T, _ *listenerMock, c *connMock, _ *BytesLimiterMock) {
 			if called {
-				assert.Len(t, c.RemoteAddrCalls(), 1)
+				assert.Len(t, c.CloseCalls(), 1)
 				return
 			}
 
-			assert.Len(t, c.RemoteAddrCalls(), 0)
+			assert.Len(t, c.CloseCalls(), 0)
 		}
 	}
 
 	type tcase struct {
-		Listener  *listenerMock
-		Limiter   *BytesLimiterMock
-		Control   *Control
-		Error     error
-		Conn      *connMock
-		SkipCheck bool
-		Checks    []check
+		Listener   *listenerMock
+		Limiter    *BytesLimiterMock
+		Success    bool
+		Error      error
+		Conn       *connMock
+		LogOutputs []string
+		Checks     []check
 	}
 
 	tests := map[string]tcase{
 		"listener.Accept returns an error": func() tcase {
-			cm := stubConn("127.0.0.1")
+			cm := stubConn(nil, nil)
 			lim := stubBytesLimiter(false, nil)
 
 			return tcase{
-				Listener: stubListener(nil, assert.AnError),
-				Limiter:  lim,
-				Control: &Control{
-					conns: make(map[string]struct{}),
-				},
-				Error: assert.AnError,
-				Conn:  cm,
+				Listener:   stubListener(nil, assert.AnError),
+				Limiter:    lim,
+				Success:    false,
+				Error:      assert.AnError,
+				Conn:       cm,
+				LogOutputs: nil,
 				Checks: []check{
 					wasListenerAcceptCalled(true),
 					wasCheckBytesCalled(false),
-					wasConnRemoteAddrCalled(false),
-					wasControlPointAddCalled(false, ""),
+					wasConnWriteCalled(0),
+					wasConnCloseCalled(false),
 				},
 			}
 		}(),
 		"limiter.CheckBytes returns an error": func() tcase {
-			cm := stubConn("127.0.0.1")
+			cm := stubConn(nil, nil)
 			lim := stubBytesLimiter(false, assert.AnError)
 
 			return tcase{
 				Listener: stubListener(cm, nil),
 				Limiter:  lim,
-				Control: &Control{
-					conns: make(map[string]struct{}),
+				Success:  false,
+				Conn:     cm,
+				LogOutputs: []string{
+					"level=ERROR msg=\"failed to check bytes\" error=\"assert.AnError general error for testing\"\n",
 				},
-				Error: assert.AnError,
-				Conn:  cm,
 				Checks: []check{
 					wasListenerAcceptCalled(true),
 					wasCheckBytesCalled(true),
-					wasConnRemoteAddrCalled(false),
-					wasControlPointAddCalled(false, ""),
+					wasConnWriteCalled(9),
+					wasConnCloseCalled(true),
 				},
 			}
 		}(),
-		"Successfully accepted a connection, however it was added to a control": func() tcase {
-			cm := stubConn("127.0.0.1")
+		"limiter.CheckBytes and conn.Write returns an error": func() tcase {
+			cm := stubConn(assert.AnError, nil)
+			lim := stubBytesLimiter(false, assert.AnError)
+
+			return tcase{
+				Listener: stubListener(cm, nil),
+				Limiter:  lim,
+				Success:  false,
+				Conn:     cm,
+				LogOutputs: []string{
+					"level=ERROR msg=\"failed to check bytes\" error=\"assert.AnError general error for testing\"\n",
+					"level=ERROR msg=\"failed to write internal error response\" error=\"assert.AnError general error for testing\"\n",
+				},
+				Checks: []check{
+					wasListenerAcceptCalled(true),
+					wasCheckBytesCalled(true),
+					wasConnWriteCalled(1),
+					wasConnCloseCalled(true),
+				},
+			}
+		}(),
+		"conn.Write returns an error": func() tcase {
+			cm := stubConn(assert.AnError, nil)
 			lim := stubBytesLimiter(false, nil)
 
 			return tcase{
 				Listener: stubListener(cm, nil),
 				Limiter:  lim,
-				Control: &Control{
-					conns: make(map[string]struct{}),
+				Success:  false,
+				Conn:     cm,
+				LogOutputs: []string{
+					"level=ERROR msg=\"failed to write exceeded limit response\" error=\"assert.AnError general error for testing\"\n",
 				},
-				Conn:      cm,
-				SkipCheck: true,
 				Checks: []check{
 					wasListenerAcceptCalled(true),
 					wasCheckBytesCalled(true),
-					wasConnRemoteAddrCalled(true),
-					wasControlPointAddCalled(true, "127.0.0.1"),
+					wasConnWriteCalled(1),
+					wasConnCloseCalled(true),
 				},
 			}
 		}(),
-		"Successfully accepted a connection": func() tcase {
-			cm := stubConn("127.0.0.1")
-			lim := stubBytesLimiter(true, nil)
+		"conn.Write and conn.Close returns an error": func() tcase {
+			cm := stubConn(assert.AnError, assert.AnError)
+			lim := stubBytesLimiter(false, nil)
 
 			return tcase{
 				Listener: stubListener(cm, nil),
 				Limiter:  lim,
-				Control: &Control{
-					conns: make(map[string]struct{}),
+				Success:  false,
+				Conn:     cm,
+				LogOutputs: []string{
+					"level=ERROR msg=\"failed to write exceeded limit response\" error=\"assert.AnError general error for testing\"\n",
+					"level=ERROR msg=\"failed to close connection\" error=\"assert.AnError general error for testing\"\n",
 				},
-				Conn:      cm,
-				SkipCheck: false,
 				Checks: []check{
 					wasListenerAcceptCalled(true),
 					wasCheckBytesCalled(true),
-					wasConnRemoteAddrCalled(false),
-					wasControlPointAddCalled(false, ""),
+					wasConnWriteCalled(1),
+					wasConnCloseCalled(true),
+				},
+			}
+		}(),
+		"Rejected a connection due to limits breach": func() tcase {
+			cm := stubConn(nil, nil)
+			lim := stubBytesLimiter(false, nil)
+
+			return tcase{
+				Listener:   stubListener(cm, nil),
+				Limiter:    lim,
+				Success:    false,
+				Conn:       cm,
+				LogOutputs: nil,
+				Checks: []check{
+					wasListenerAcceptCalled(true),
+					wasCheckBytesCalled(true),
+					wasConnWriteCalled(9), // response write makes 9 calls
+					wasConnCloseCalled(true),
+				},
+			}
+		}(),
+		"Successfully accepted a connection": func() tcase {
+			cm := stubConn(nil, nil)
+			lim := stubBytesLimiter(true, nil)
+
+			return tcase{
+				Listener:   stubListener(cm, nil),
+				Limiter:    lim,
+				Success:    true,
+				Conn:       cm,
+				LogOutputs: nil,
+				Checks: []check{
+					wasListenerAcceptCalled(true),
+					wasCheckBytesCalled(true),
+					wasConnWriteCalled(0),
+					wasConnCloseCalled(false),
 				},
 			}
 		}(),
@@ -197,16 +252,18 @@ func Test_Listener_Accept(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
+			var buffer bytes.Buffer
+
 			l := &Listener{
+				log:      slog.New(slog.NewTextHandler(&buffer, nil)),
 				listener: test.Listener,
 				limiter:  test.Limiter,
-				control:  test.Control,
 			}
 
 			conn, err := l.Accept()
 
 			for _, check := range test.Checks {
-				check(t, test.Listener, test.Conn, test.Limiter, test.Control)
+				check(t, test.Listener, test.Conn, test.Limiter)
 			}
 
 			if test.Error != nil {
@@ -217,11 +274,23 @@ func Test_Listener_Accept(t *testing.T) {
 			}
 
 			require.NoError(t, err)
-			assert.Equal(t, &Conn{
-				conn:      test.Conn,
-				skipCheck: test.SkipCheck,
-				limiter:   test.Limiter,
-			}, conn)
+
+			for i := range test.LogOutputs {
+				assert.Contains(t, buffer.String(), test.LogOutputs[i])
+			}
+
+			if test.LogOutputs == nil {
+				assert.Empty(t, buffer.String())
+			}
+
+			if test.Success {
+				assert.Equal(t, &Conn{
+					conn:    test.Conn,
+					limiter: test.Limiter,
+				}, conn)
+			} else {
+				assert.Equal(t, test.Conn, conn)
+			}
 		})
 	}
 }
@@ -291,16 +360,6 @@ func Test_Conn_Read(t *testing.T) {
 				wasBytesLimiterUseBytesCalled(true, 0),
 			},
 		},
-		"Successfully read from connection with skip check enabled": {
-			Conn:      stubConn(3, nil),
-			Limiter:   stubBytesLimiter(nil),
-			SkipCheck: true,
-			Size:      3,
-			Checks: []check{
-				wasConnReadCalled([]byte{1, 2, 3}),
-				wasBytesLimiterUseBytesCalled(false, 3),
-			},
-		},
 		"Successfully read from connection": {
 			Conn:    stubConn(3, nil),
 			Limiter: stubBytesLimiter(nil),
@@ -317,9 +376,8 @@ func Test_Conn_Read(t *testing.T) {
 			t.Parallel()
 
 			c := &Conn{
-				conn:      test.Conn,
-				skipCheck: test.SkipCheck,
-				limiter:   test.Limiter,
+				conn:    test.Conn,
+				limiter: test.Limiter,
 			}
 
 			n, err := c.Read([]byte{1, 2, 3})
@@ -374,12 +432,11 @@ func Test_Conn_Write(t *testing.T) {
 	}
 
 	tests := map[string]struct {
-		Conn      *connMock
-		SkipCheck bool
-		Limiter   *BytesLimiterMock
-		Size      int
-		Error     error
-		Checks    []check
+		Conn    *connMock
+		Limiter *BytesLimiterMock
+		Size    int
+		Error   error
+		Checks  []check
 	}{
 		"conn.Write returns an error": {
 			Conn:    stubConn(0, assert.AnError),
@@ -399,16 +456,6 @@ func Test_Conn_Write(t *testing.T) {
 				wasBytesLimiterUseBytesCalled(true, 0),
 			},
 		},
-		"Successfully read from connection with skip check enabled": {
-			Conn:      stubConn(3, nil),
-			Limiter:   stubBytesLimiter(nil),
-			SkipCheck: true,
-			Size:      3,
-			Checks: []check{
-				wasConnWriteCalled([]byte{1, 2, 3}),
-				wasBytesLimiterUseBytesCalled(false, 3),
-			},
-		},
 		"Successfully read from connection": {
 			Conn:    stubConn(3, nil),
 			Limiter: stubBytesLimiter(nil),
@@ -425,9 +472,8 @@ func Test_Conn_Write(t *testing.T) {
 			t.Parallel()
 
 			c := &Conn{
-				conn:      test.Conn,
-				skipCheck: test.SkipCheck,
-				limiter:   test.Limiter,
+				conn:    test.Conn,
+				limiter: test.Limiter,
 			}
 
 			n, err := c.Write([]byte{1, 2, 3})

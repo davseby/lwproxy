@@ -6,22 +6,31 @@
 package intercept
 
 import (
+	"bytes"
+	"io/ioutil"
 	"net"
+	"net/http"
+	"strings"
+
+	"golang.org/x/exp/slog"
 )
+
+// _bytesLimitExceeded is the message to send when the limit is exceeded.
+const _bytesLimitExceeded = "bytes limit has been exceeded"
 
 // Listener is an intercepted listener. It intercepts the accept call.
 type Listener struct {
 	listener
 
+	log     *slog.Logger
 	limiter BytesLimiter
-	control *Control
 }
 
 // NewListener intercepts the listen call.
 func NewListener(
+	log *slog.Logger,
 	addr string,
 	limiter BytesLimiter,
-	control *Control,
 ) (*Listener, error) {
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -30,8 +39,8 @@ func NewListener(
 
 	return &Listener{
 		listener: l,
+		log:      log.With("job", "intercept-listener"),
 		limiter:  limiter,
-		control:  control,
 	}, nil
 }
 
@@ -44,18 +53,66 @@ func (l *Listener) Accept() (net.Conn, error) {
 	}
 
 	ok, err := l.limiter.CheckBytes()
-	if err != nil {
-		return nil, err
+
+	switch {
+	case err != nil:
+		l.log.Error("failed to check bytes", "error", err)
+
+		// internalErrorResponse is the response to send when server
+		// receives an internal error.
+		var internalErrorResponse = http.Response{
+			StatusCode: http.StatusPaymentRequired,
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header: http.Header{
+				"Content-Type": {"text/plain; charset=utf-8"},
+			},
+			Body:          ioutil.NopCloser(bytes.NewBuffer([]byte(_bytesLimitExceeded))),
+			ContentLength: int64(len(_bytesLimitExceeded)),
+		}
+
+		if err := internalErrorResponse.Write(conn); err != nil {
+			l.log.Error("failed to write internal error response", "error", err)
+		}
+	case !ok:
+		// exceededLimitResponse is the response to send when the limit is exceeded.
+		var exceededLimitResponse = http.Response{
+			StatusCode: http.StatusPaymentRequired,
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header: http.Header{
+				"Content-Type": {"text/plain; charset=utf-8"},
+			},
+			Body: ioutil.NopCloser(
+				bytes.NewBuffer(
+					[]byte(strings.ToLower(
+						http.StatusText(http.StatusInternalServerError),
+					)),
+				),
+			),
+			ContentLength: int64(len(http.StatusText(http.StatusInternalServerError))),
+		}
+
+		if err := exceededLimitResponse.Write(conn); err != nil {
+			l.log.Error("failed to write exceeded limit response", "error", err)
+		}
 	}
 
-	if !ok {
-		l.control.Add(conn.RemoteAddr().String())
+	if err != nil || !ok {
+		err := conn.Close()
+		if err != nil {
+			l.log.Error("failed to close connection", "error", err)
+		}
+
+		// NOTE: We don't return an error here as that would cause the
+		// listener to stop accepting connections and exit from the
+		// serve method.
+		return conn, nil
 	}
 
 	return &Conn{
-		conn:      conn,
-		limiter:   l.limiter,
-		skipCheck: !ok,
+		conn:    conn,
+		limiter: l.limiter,
 	}, nil
 }
 
@@ -64,8 +121,7 @@ func (l *Listener) Accept() (net.Conn, error) {
 type Conn struct {
 	conn
 
-	skipCheck bool
-	limiter   BytesLimiter
+	limiter BytesLimiter
 }
 
 // Read reads data from the connection. It intercepts the read call.
@@ -81,10 +137,8 @@ func (c *Conn) Read(b []byte) (int, error) {
 	// performance, however we risk using too much data and exceeding the
 	// limit. Depending on the project requirements, this could be
 	// adjusted to meet them
-	if !c.skipCheck {
-		if err := c.limiter.UseBytes(int64(n)); err != nil {
-			return 0, err
-		}
+	if err := c.limiter.UseBytes(int64(n)); err != nil {
+		return 0, err
 	}
 
 	return n, nil
@@ -98,10 +152,8 @@ func (c *Conn) Write(b []byte) (int, error) {
 	}
 
 	// NOTE: Comment applies same as for the read.
-	if !c.skipCheck {
-		if err := c.limiter.UseBytes(int64(n)); err != nil {
-			return 0, err
-		}
+	if err := c.limiter.UseBytes(int64(n)); err != nil {
+		return 0, err
 	}
 
 	return n, nil

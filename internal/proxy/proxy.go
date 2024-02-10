@@ -41,8 +41,7 @@ type Proxy struct {
 	rec     Recorder
 	limiter intercept.BytesLimiter
 
-	cfg     Config
-	control *intercept.Control
+	cfg Config
 }
 
 // Config holds the settings for the proxy server.
@@ -69,18 +68,17 @@ func NewProxy(
 	db DB,
 	cfg Config,
 ) (*Proxy, error) {
-	var bl intercept.BytesLimiter = enforce.NewNoopBytesLimiter()
+	var limiter intercept.BytesLimiter = enforce.NewNoopBytesLimiter()
 
 	if cfg.MaxBytes > 0 {
-		bl = enforce.NewBytesLimiter(db, cfg.MaxBytes)
+		limiter = enforce.NewBytesLimiter(db, cfg.MaxBytes)
 	}
 
 	p := &Proxy{
 		log:     log.With("job", "proxy"),
 		rec:     rec,
 		cfg:     cfg,
-		limiter: bl,
-		control: intercept.NewControl(),
+		limiter: limiter,
 	}
 
 	p.srv = &http.Server{
@@ -105,15 +103,12 @@ func (p *Proxy) ListenAndServe(ctx context.Context) {
 	stopCh := make(chan struct{})
 
 	go func() {
-		defer func() {
-			p.control.Clean()
-			close(stopCh)
-		}()
+		defer close(stopCh)
 
 		il, err := intercept.NewListener(
+			p.log,
 			p.srv.Addr,
 			p.limiter,
-			p.control,
 		)
 		if err != nil {
 			p.silentError(err, "creating listener")
@@ -146,13 +141,6 @@ func (p *Proxy) ListenAndServe(ctx context.Context) {
 // they are invalid, the proxy responds with a 407 status code and a
 // Proxy-Authenticate header.
 func (p *Proxy) authHandler(w http.ResponseWriter, r *http.Request) {
-	// NOTE: In order for us to be able to respond with a proper error
-	// message, we need to allow the initial request data to be read.
-	if p.control.HasRemove(r.RemoteAddr) {
-		http.Error(w, "bytes limit exceeded", http.StatusRequestEntityTooLarge)
-		return
-	}
-
 	if !p.auth(r.Header.Get("Proxy-Authorization")) {
 		w.Header().Set("Proxy-Authenticate", "Basic")
 		w.WriteHeader(http.StatusProxyAuthRequired)
@@ -179,25 +167,18 @@ func (p *Proxy) recordHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p.requestHandler(w, r)
+	p.deadlineHandler(w, r)
 }
 
-// requestHandler determines how the request should be proxied.
-func (p *Proxy) requestHandler(w http.ResponseWriter, r *http.Request) {
+// deadlineHandler appends a deadline to the request.
+func (p *Proxy) deadlineHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithDeadline(
 		r.Context(),
 		time.Now().Add(_connectionTimeout),
 	)
 	defer cancel()
 
-	r = r.WithContext(ctx)
-
-	if r.Method == http.MethodConnect {
-		p.tunnelingHandler(w, r)
-		return
-	}
-
-	p.httpHandler(w, r)
+	p.tunnelingHandler(w, r.WithContext(ctx), r.Method == http.MethodConnect)
 }
 
 // auth handles proxy authentication checking.

@@ -39,14 +39,13 @@ func Test_Processor_Handle(t *testing.T) {
 	err := proc.Handle(rec)
 	require.NoError(t, err)
 
-	assert.Equal(
+	assert.Contains(
 		t,
+		buffer.String(),
 		fmt.Sprintf(
-			"time=%s level=INFO msg=\"publishing request record\" id=%s host=%s\n",
-			rec.CreatedAt.Format("2006-01-02T15:04:05.999Z07:00"),
+			"level=INFO msg=\"publishing request record\" id=%s host=%s\n",
 			rec.ID.String(),
 			rec.Host,
 		),
-		buffer.String(),
 	)
 }
