@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/davseby/lwproxy/internal/proxy/enforce"
-	"github.com/davseby/lwproxy/internal/proxy/intercept"
+	"github.com/davseby/lwproxy/internal/proxy/internal/enforce"
+	"github.com/davseby/lwproxy/internal/proxy/internal/intercept"
 	"github.com/davseby/lwproxy/internal/request"
 	"golang.org/x/exp/slog"
 )
@@ -33,11 +33,11 @@ type Proxy struct {
 
 	srv *http.Server
 
-	rp Recorder
-	bl intercept.BytesLimiter
+	rec     Recorder
+	limiter intercept.BytesLimiter
 
-	cfg ProxyConfig
-	cp  *intercept.ControlPoint
+	cfg          ProxyConfig
+	controlPoint *intercept.ControlPoint
 }
 
 // ProxyConfig holds the settings for the proxy server.
@@ -58,22 +58,22 @@ type ProxyConfig struct {
 // NewProxy creates a new proxy server.
 func NewProxy(
 	log *slog.Logger,
-	rp Recorder,
+	rec Recorder,
 	db DB,
 	cfg ProxyConfig,
 ) (*Proxy, error) {
 	var bl intercept.BytesLimiter = enforce.NewNoopBytesLimiter()
 
 	if cfg.MaxBytes > 0 {
-		bl = enforce.NewBytesLimiter(log, db, cfg.MaxBytes)
+		bl = enforce.NewBytesLimiter(db, cfg.MaxBytes)
 	}
 
 	p := &Proxy{
-		log: log.With("job", "proxy"),
-		rp:  rp,
-		cfg: cfg,
-		bl:  bl,
-		cp:  intercept.NewControlPoint(),
+		log:          log.With("job", "proxy"),
+		rec:          rec,
+		cfg:          cfg,
+		limiter:      bl,
+		controlPoint: intercept.NewControlPoint(),
 	}
 
 	p.srv = &http.Server{
@@ -93,30 +93,25 @@ func (p *Proxy) ListenAndServe(ctx context.Context) {
 
 	go func() {
 		defer func() {
-			p.cp.Clean()
+			p.controlPoint.Clean()
 			close(stopCh)
 		}()
 
 		il, err := intercept.NewListener(
-			"tcp",
 			p.srv.Addr,
-			p.bl,
-			p.cp,
+			p.limiter,
+			p.controlPoint,
 		)
 		if err != nil {
-			p.log.With("error", err).
-				Error("creating listener")
+			p.log.Error("creating listener", slog.String("error", err.Error()))
 
 			return
 		}
 
 		err = p.srv.Serve(il)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			p.log.With("error", err).
-				Error("listening and serving")
+			p.log.Error("listening and serving", slog.String("error", err.Error()))
 		}
-
-		time.Sleep(time.Second)
 	}()
 
 	select {
@@ -127,8 +122,7 @@ func (p *Proxy) ListenAndServe(ctx context.Context) {
 
 		err := p.srv.Shutdown(closureCtx)
 		if err != nil {
-			p.log.With("error", err).
-				Error("shutting down server")
+			p.log.Error("shutting down server", slog.String("error", err.Error()))
 		}
 
 		<-stopCh
@@ -149,7 +143,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// could be to use a buffered channel communication. In case we publish
 	// directly to a message broker, we should be able to avoid these
 	// problems, except for the error handling.
-	if err := p.rp.Create(request.NewRecord(r.Host)); err != nil {
+	if err := p.rec.Handle(request.NewRecord(r.Host)); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -158,7 +152,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// message, we need to allow the initial request data to be read. This
 	// check is critical as if we don't use this, the client will be able
 	// to use as much traffic as it wants, without it being logged.
-	if p.cp.HasRemove(r.RemoteAddr) {
+	if p.controlPoint.HasRemove(r.RemoteAddr) {
 		http.Error(w, "bytes limit exceeded", http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -211,8 +205,7 @@ func (p *Proxy) handleAuth(w http.ResponseWriter, r *http.Request) bool {
 
 	err := resp.Write(w)
 	if err != nil {
-		p.log.With("error", err).
-			Error("writing authentication response")
+		p.log.Error("writing authentication response", slog.String("error", err.Error()))
 	}
 
 	return false
@@ -220,16 +213,15 @@ func (p *Proxy) handleAuth(w http.ResponseWriter, r *http.Request) bool {
 
 // silentError returns true if the error can be silenced.
 func silentError(err error) bool {
-	return errors.Is(err, context.Canceled) ||
-		errors.Is(err, os.ErrDeadlineExceeded) ||
+	return errors.Is(err, os.ErrDeadlineExceeded) ||
 		errors.Is(err, net.ErrClosed) ||
 		errors.Is(err, enforce.ErrLimitExceeded)
 }
 
 // Recorder should be used to record proxy requests.
 type Recorder interface {
-	// Create should create a new record.
-	Create(rec request.Record) error
+	// Handle should handle a new record.
+	Handle(rec request.Record) error
 }
 
 // DB is an interface for a database communication.

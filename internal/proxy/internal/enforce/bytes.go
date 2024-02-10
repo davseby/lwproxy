@@ -1,30 +1,32 @@
+// package enforce provides an API to manage bytes usage and limit it.
+//
+//go:generate moq --stub -out 0moq_test.go . DB:DBMock
 package enforce
 
 import (
 	"context"
 	"errors"
 	"sync"
-
-	"golang.org/x/exp/slog"
+	"time"
 )
 
 // ErrLimitExceeded is an error for when the bytes limit is exceeded.
 var ErrLimitExceeded = errors.New("bytes limit exceeded")
 
+// _requestTimeout is the timeout for the request.
+const _requestTimeout = 5 * time.Second
+
 // BytesLimiter is a struct that supervises bytes usage and limits it.
 type BytesLimiter struct {
-	log *slog.Logger
-
 	mu sync.RWMutex
-	db DB
 
+	db       DB
 	maxBytes int64
 }
 
 // NewBytesLimiter creates a new limiter.
-func NewBytesLimiter(log *slog.Logger, db DB, maxBytes int64) *BytesLimiter {
+func NewBytesLimiter(db DB, maxBytes int64) *BytesLimiter {
 	return &BytesLimiter{
-		log:      log.With("job", "limiter"),
 		db:       db,
 		maxBytes: maxBytes,
 	}
@@ -36,7 +38,10 @@ func (bl *BytesLimiter) CheckBytes() (bool, error) {
 	bl.mu.RLock()
 	defer bl.mu.RUnlock()
 
-	bytes, err := bl.db.FetchBytes(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), _requestTimeout)
+	defer cancel()
+
+	bytes, err := bl.db.FetchBytes(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -50,7 +55,10 @@ func (bl *BytesLimiter) UseBytes(usedBytes int64) error {
 	bl.mu.Lock()
 	defer bl.mu.Unlock()
 
-	bytes, err := bl.db.FetchBytes(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), _requestTimeout)
+	defer cancel()
+
+	bytes, err := bl.db.FetchBytes(ctx)
 	if err != nil {
 		return err
 	}
@@ -61,7 +69,7 @@ func (bl *BytesLimiter) UseBytes(usedBytes int64) error {
 		overflow = true
 	}
 
-	if err := bl.db.IncreaseBytes(context.Background(), usedBytes); err != nil {
+	if err := bl.db.IncreaseBytes(ctx, usedBytes); err != nil {
 		return err
 	}
 

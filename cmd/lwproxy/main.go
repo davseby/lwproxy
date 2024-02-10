@@ -41,9 +41,7 @@ func main() {
 		},
 	}).Load()
 	if err != nil {
-		slog.Default().
-			With("error", err).
-			Error("loading configuration")
+		slog.Default().Error("loading configuration", slog.String("error", err.Error()))
 
 		return
 	}
@@ -55,8 +53,7 @@ func main() {
 
 	stop, err := startServices(log, cfg)
 	if err != nil {
-		log.With("error", err).
-			Error("starting services")
+		log.Error("starting services", slog.String("error", err.Error()))
 		return
 	}
 	defer stop()

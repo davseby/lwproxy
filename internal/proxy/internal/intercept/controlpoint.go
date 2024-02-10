@@ -36,15 +36,6 @@ func (cp *ControlPoint) HasRemove(remoteAddr string) bool {
 	return ok
 }
 
-// Has reports whether the remote address is in the control point.
-func (cp *ControlPoint) Has(remoteAddr string) bool {
-	cp.mu.RLock()
-	defer cp.mu.RUnlock()
-
-	_, ok := cp.conns[remoteAddr]
-	return ok
-}
-
 // Clean cleans the control point remote addresses.
 func (cp *ControlPoint) Clean() {
 	cp.mu.Lock()

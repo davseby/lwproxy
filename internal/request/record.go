@@ -12,9 +12,6 @@ type Record struct {
 	// ID is the unique identifier of the request.
 	ID xid.ID
 
-	// Scheme is the scheme of the request.
-	Scheme string
-
 	// Host is the host of the request.
 	Host string
 

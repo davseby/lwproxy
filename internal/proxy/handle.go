@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"sync"
+
+	"golang.org/x/exp/slog"
 )
 
 // handleRequest handles a basic HTTP request.
@@ -29,15 +31,13 @@ func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if ok {
 		err := http.NewResponseController(w).SetWriteDeadline(deadline)
 		if err != nil {
-			p.log.With("error", err).
-				Error("setting connection write deadline")
+			p.log.Error("setting connection write deadline", slog.String("error", err.Error()))
 		}
 	}
 
 	_, err = io.Copy(w, resp.Body)
 	if err != nil && !silentError(err) {
-		p.log.With("error", err).
-			Error("handling request communication")
+		p.log.Error("handling request communication", slog.String("error", err.Error()))
 	}
 }
 
@@ -75,28 +75,24 @@ func (p *Proxy) establishCommunication(ctx context.Context, baseConn, targetConn
 	if ok {
 		err := baseConn.SetDeadline(deadline)
 		if err != nil {
-			p.log.With("error", err).
-				Error("setting base connection deadline")
+			p.log.Error("setting base connection deadline", slog.String("error", err.Error()))
 		}
 
 		err = targetConn.SetDeadline(deadline)
 		if err != nil {
-			p.log.With("error", err).
-				Error("setting target connection deadline")
+			p.log.Error("setting target connection deadline", slog.String("error", err.Error()))
 		}
 	}
 
 	closeConnections := func() {
 		err := targetConn.Close()
 		if err != nil && !silentError(err) {
-			p.log.With("error", err).
-				Error("closing target connection")
+			p.log.Error("closing target connection", slog.String("error", err.Error()))
 		}
 
 		err = baseConn.Close()
 		if err != nil && !silentError(err) {
-			p.log.With("error", err).
-				Error("closing base connection")
+			p.log.Error("closing base connection", slog.String("error", err.Error()))
 		}
 	}
 
@@ -109,8 +105,7 @@ func (p *Proxy) establishCommunication(ctx context.Context, baseConn, targetConn
 
 		_, err := io.Copy(baseConn, targetConn)
 		if err != nil && !silentError(err) {
-			p.log.With("error", err).
-				Error("handling base to target communication")
+			p.log.Error("handling base to target communication", slog.String("error", err.Error()))
 		}
 
 		closeConnections()
@@ -123,8 +118,7 @@ func (p *Proxy) establishCommunication(ctx context.Context, baseConn, targetConn
 
 		_, err := io.Copy(targetConn, baseConn)
 		if err != nil && !silentError(err) {
-			p.log.With("error", err).
-				Error("handling target to base communication")
+			p.log.Error("handling target to base communication", slog.String("error", err.Error()))
 		}
 
 		closeConnections()

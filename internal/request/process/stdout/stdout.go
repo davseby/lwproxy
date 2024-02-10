@@ -18,11 +18,13 @@ func NewProcessor(log *slog.Logger) *Processor {
 	}
 }
 
-// Process processes a request record.
-func (p *Processor) Create(rec request.Record) error {
-	p.log.With("id", rec.ID.String()).
-		With("host", rec.Host).
-		Info("publishing request record")
+// Handle handles a new record.
+func (p *Processor) Handle(rec request.Record) error {
+	p.log.Info(
+		"publishing request record",
+		slog.String("id", rec.ID.String()),
+		slog.String("host", rec.Host),
+	)
 
 	return nil
 }
