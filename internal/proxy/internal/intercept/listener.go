@@ -107,7 +107,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 	return n, nil
 }
 
-// BytesLimiter should be used to enforce bytes limitation to the the proxy
+// BytesLimiter should be used to enforce bytes limitation to the proxy
 // read and write operations.
 type BytesLimiter interface {
 	// CheckBytes should check if the bytes limit is exceeded.

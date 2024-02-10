@@ -212,6 +212,7 @@ func Test_Listener_Accept(t *testing.T) {
 			if test.Error != nil {
 				assert.Equal(t, test.Error, err)
 				assert.Nil(t, conn)
+
 				return
 			}
 
@@ -256,6 +257,7 @@ func Test_Conn_Read(t *testing.T) {
 			if called {
 				assert.Len(t, lim.UseBytesCalls(), 1)
 				assert.Equal(t, size, lim.UseBytesCalls()[0].N)
+
 				return
 			}
 
@@ -363,6 +365,7 @@ func Test_Conn_Write(t *testing.T) {
 			if called {
 				assert.Len(t, bl.UseBytesCalls(), 1)
 				assert.Equal(t, size, bl.UseBytesCalls()[0].N)
+
 				return
 			}
 

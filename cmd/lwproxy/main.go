@@ -18,7 +18,7 @@ import (
 // Config is the application configuration.
 type Config struct {
 	// Proxy is the proxy server configuration.
-	Proxy proxy.ProxyConfig
+	Proxy proxy.Config
 
 	// Log is the logging configuration.
 	Log struct {
@@ -56,6 +56,7 @@ func main() {
 		log.Error("starting services", slog.String("error", err.Error()))
 		return
 	}
+
 	defer stop()
 
 	trapInstance(log)

@@ -3,6 +3,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"net"
@@ -24,8 +25,11 @@ const (
 	// _targetDialTimeout is the timeout for dialing the target.
 	_targetDialTimeout = 10 * time.Second
 
-	// _connectionDeadline is the deadline for a connection.
-	_connectionDeadline = 2 * time.Hour
+	// _connectionTimeout is the timeout for a connection.
+	_connectionTimeout = 2 * time.Hour
+
+	// _readHeaderTimeout is the timeout for reading the header.
+	_readHeaderTimeout = 5 * time.Second
 )
 
 // Proxy is a proxy server.
@@ -37,23 +41,25 @@ type Proxy struct {
 	rec     Recorder
 	limiter intercept.BytesLimiter
 
-	cfg     ProxyConfig
+	cfg     Config
 	control *intercept.Control
 }
 
-// ProxyConfig holds the settings for the proxy server.
-type ProxyConfig struct {
+// Config holds the settings for the proxy server.
+type Config struct {
 	// Addr is the address to listen on.
 	Addr string `default:":8081"`
 
 	// MaxBytes is the maximum amount of bytes that can be used.
 	MaxBytes int64 `default:"2000000000"`
 
-	// Username is the username for basic authentication.
-	Username string `default:"admin"`
+	Auth struct {
+		// Username is the username for basic authentication.
+		Username string `default:"admin"`
 
-	// Password is the password for basic authentication.
-	Password string `default:"admin"`
+		// Password is the password for basic authentication.
+		Password string `default:"admin"`
+	}
 }
 
 // NewProxy creates a new proxy server.
@@ -61,7 +67,7 @@ func NewProxy(
 	log *slog.Logger,
 	rec Recorder,
 	db DB,
-	cfg ProxyConfig,
+	cfg Config,
 ) (*Proxy, error) {
 	var bl intercept.BytesLimiter = enforce.NewNoopBytesLimiter()
 
@@ -78,8 +84,14 @@ func NewProxy(
 	}
 
 	p.srv = &http.Server{
-		Addr:    cfg.Addr,
-		Handler: p,
+		Addr:              cfg.Addr,
+		Handler:           http.HandlerFunc(p.authHandler),
+		ReadHeaderTimeout: _readHeaderTimeout,
+
+		// NOTE: We need to set TLSNextProto to an empty map to disable
+		// HTTP/2 support. This is because we need to intercept the
+		// connection and we can't do that with HTTP/2.
+		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
 	}
 
 	return p, nil
@@ -89,7 +101,7 @@ func NewProxy(
 // context is done or server listening procedure returns an error.
 func (p *Proxy) ListenAndServe(ctx context.Context) {
 	// NOTE: By having stop channel we can retry opening a server in case
-	// the ListenAndServe method fails.
+	// the Serve method fails.
 	stopCh := make(chan struct{})
 
 	go func() {
@@ -104,14 +116,14 @@ func (p *Proxy) ListenAndServe(ctx context.Context) {
 			p.control,
 		)
 		if err != nil {
-			p.log.Error("creating listener", slog.String("error", err.Error()))
+			p.silentError(err, "creating listener")
 
 			return
 		}
 
 		err = p.srv.Serve(il)
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			p.log.Error("listening and serving", slog.String("error", err.Error()))
+		if err != nil {
+			p.silentError(err, "listening and serving")
 		}
 	}()
 
@@ -121,21 +133,39 @@ func (p *Proxy) ListenAndServe(ctx context.Context) {
 		closureCtx, closureCancel := context.WithTimeout(context.Background(), _closeTimeout)
 		defer closureCancel()
 
-		err := p.srv.Shutdown(closureCtx)
+		err := p.srv.Shutdown(closureCtx) //nolint: contextcheck // we cannot use base context here as it is already cancelled and we want to give time for a shutdown.
 		if err != nil {
-			p.log.Error("shutting down server", slog.String("error", err.Error()))
+			p.silentError(err, "shutting down server")
 		}
 
 		<-stopCh
 	}
 }
 
-// ServeHTTP serves HTTP requests.
-func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !p.handleAuth(w, r) {
+// authHandler checks if the provided proxy credentials are valid. In case
+// they are invalid, the proxy responds with a 407 status code and a
+// Proxy-Authenticate header.
+func (p *Proxy) authHandler(w http.ResponseWriter, r *http.Request) {
+	// NOTE: In order for us to be able to respond with a proper error
+	// message, we need to allow the initial request data to be read.
+	if p.control.HasRemove(r.RemoteAddr) {
+		http.Error(w, "bytes limit exceeded", http.StatusRequestEntityTooLarge)
 		return
 	}
 
+	if !p.auth(r.Header.Get("Proxy-Authorization")) {
+		w.Header().Set("Proxy-Authenticate", "Basic")
+		w.WriteHeader(http.StatusProxyAuthRequired)
+
+		return
+	}
+
+	p.recordHandler(w, r)
+}
+
+// recordHandler creates a new request record and publishes it to the
+// recorder.
+func (p *Proxy) recordHandler(w http.ResponseWriter, r *http.Request) {
 	// NOTE: We publish a request record before handling the request.
 	// This could be done in a separate goroutine to avoid blocking the
 	// request handling as we don't know what will be done in the publish
@@ -149,61 +179,61 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// NOTE: In order for us to to be able to respond with a proper error
-	// message, we need to allow the initial request data to be read. This
-	// check is critical as if we don't use this, the client will be able
-	// to use as much traffic as it wants, without it being logged.
-	if p.control.HasRemove(r.RemoteAddr) {
-		http.Error(w, "bytes limit exceeded", http.StatusRequestEntityTooLarge)
-		return
-	}
+	p.requestHandler(w, r)
+}
 
+// requestHandler determines how the request should be proxied.
+func (p *Proxy) requestHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithDeadline(
 		r.Context(),
-		time.Now().Add(_connectionDeadline),
+		time.Now().Add(_connectionTimeout),
 	)
 	defer cancel()
 
+	r = r.WithContext(ctx)
+
 	if r.Method == http.MethodConnect {
-		p.handleTunneling(w, r.WithContext(ctx))
+		p.tunnelingHandler(w, r)
 		return
 	}
 
-	p.handleRequest(w, r.WithContext(ctx))
+	p.httpHandler(w, r)
 }
 
-// handleAuth handles the basic authentication.
-func (p *Proxy) handleAuth(w http.ResponseWriter, r *http.Request) bool {
-	key := strings.SplitN(r.Header.Get("Proxy-Authorization"), " ", 2)
-	if key[0] == "Basic" {
-		key, err := base64.StdEncoding.DecodeString(key[1])
-		if err != nil {
-			http.Error(w, "authorization failed", http.StatusUnauthorized)
-
-			return false
-		}
-
-		parts := strings.SplitN(string(key), ":", 2)
-		if len(parts) != 2 || p.cfg.Username != parts[0] || p.cfg.Password != parts[1] {
-			http.Error(w, "authorization failed", http.StatusUnauthorized)
-
-			return false
-		}
-
-		return true
+// auth handles proxy authentication checking.
+func (p *Proxy) auth(header string) bool {
+	bkey := strings.SplitN(header, " ", 2)
+	if bkey[0] != "Basic" {
+		return false
 	}
 
-	w.Header().Set("Proxy-Authenticate", "Basic")
-	w.WriteHeader(http.StatusProxyAuthRequired)
+	key, err := base64.StdEncoding.DecodeString(bkey[1])
+	if err != nil {
+		p.log.Debug("decoding basic auth", slog.String("error", err.Error()))
 
-	return false
+		return false
+	}
+
+	parts := strings.SplitN(string(key), ":", 2)
+	if len(parts) != 2 || p.cfg.Auth.Username != parts[0] || p.cfg.Auth.Password != parts[1] {
+		return false
+	}
+
+	return true
 }
 
 // silentError returns true if the error can be silenced.
-func silentError(err error) bool {
-	return errors.Is(err, os.ErrDeadlineExceeded) ||
+func (p *Proxy) silentError(err error, msg string) {
+	fn := p.log.Error
+
+	if errors.Is(err, os.ErrDeadlineExceeded) ||
 		errors.Is(err, net.ErrClosed) ||
-		errors.Is(err, enforce.ErrLimitExceeded)
+		errors.Is(err, enforce.ErrLimitExceeded) ||
+		errors.Is(err, http.ErrServerClosed) {
+		fn = p.log.Debug
+	}
+
+	fn(msg, slog.String("error", err.Error()))
 }
 
 // Recorder should be used to record proxy requests.
