@@ -50,8 +50,8 @@ type Config struct {
 	Addr string `default:":8081"`
 
 	// MaxBytes is the maximum amount of bytes that can be used.
-	// The default value is 2GB.
-	MaxBytes int64 `default:"2000000000"`
+	// The default value is 1GB.
+	MaxBytes int64 `default:"1000000000"`
 
 	Auth struct {
 		// Username is the username used for basic authentication.

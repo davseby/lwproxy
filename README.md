@@ -30,7 +30,7 @@ directory.
 -   `proxy_addr` - _string (default: :8081)_  
     Proxy server address.
 
--   `proxy_max_bytes` - _integer (64bit; default: 2000000000)_  
+-   `proxy_max_bytes` - _integer (64bit; default: 1000000000)_  
     Maximum bytes that can be used throughout the applications lifetime.
     Setting the value to 0 will turn off the bytes limit checking.
 
