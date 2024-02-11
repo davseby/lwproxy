@@ -10,7 +10,14 @@ A lightweight http proxy.
 
 ## Usage
 
-To launch the application, simply type `go run .` or use `make run`.
+To launch the application, simply type `go run ./...` or use `make run`.
+
+If launching the application from a directory that is not the root of the
+project, make sure to include `config` flag with a path to a configuration.
+
+```
+go run ./... --config=path/to/config.yaml
+```
 
 ## Configuration
 
@@ -20,7 +27,7 @@ directory.
 
 ### Variables
 
--   `proxy_addr` - _string (default: :8181)_  
+-   `proxy_addr` - _string (default: :8081)_  
     Proxy server address.
 
 -   `proxy_max_bytes` - _integer (64bit; default: 2000000000)_  
@@ -34,7 +41,7 @@ directory.
     Proxy server authentication password.
 
 -   `log_level` - _string (default: info)_  
-    Proxy logs level. Available levels: debug, info, warn, error.
+    Proxy logs level. Available levels: `debug`, `info`, `warn`, `error`.
 
 ## Tips
 
@@ -43,4 +50,5 @@ open-source [FoxyProxy](https://github.com/foxyproxy/browser-extension)
 browser extension could be used.
 
 To set it up, simply navigate to the `Proxies` and create a `HTTP` proxy. For
-the authorization to work as expected, a browser restart may be needed.
+the authorization to work as expected, a browser restart may be needed to pick
+up the correct credentials.

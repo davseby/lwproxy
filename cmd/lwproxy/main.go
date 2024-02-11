@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"flag"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/cristalhq/aconfig"
 	"github.com/cristalhq/aconfig/aconfigyaml"
@@ -14,6 +16,9 @@ import (
 	"github.com/davseby/lwproxy/internal/request/process/stdout"
 	"golang.org/x/exp/slog"
 )
+
+// _retryTimeout is the timeout for retrying.
+const _retryTimeout = 5 * time.Second
 
 // Config is the application configuration.
 type Config struct {
@@ -28,13 +33,18 @@ type Config struct {
 }
 
 func main() {
+	var configPath string
+
+	flag.StringVar(&configPath, "config", "config/.env.config.yaml", "path to the configuration file")
+	flag.Parse()
+
 	var cfg Config
 
 	err := aconfig.LoaderFor(&cfg, aconfig.Config{
 		SkipEnv:   true,
 		SkipFlags: true,
 		Files: []string{
-			"../../config/.env.config.yaml",
+			configPath,
 		},
 		FileDecoders: map[string]aconfig.FileDecoder{
 			".yaml": aconfigyaml.New(),
@@ -86,6 +96,8 @@ func startServices(log *slog.Logger, cfg Config) (func(), error) {
 
 		for ctx.Err() == nil {
 			server.ListenAndServe(ctx)
+
+			contextRetry(ctx)
 		}
 	}()
 
@@ -96,6 +108,8 @@ func startServices(log *slog.Logger, cfg Config) (func(), error) {
 }
 
 // trapInstance blocks until a termination signal is received.
+// NOTE: For a mono-repo setup we could move the trapInstance and
+// contextRetry functions to a separate internal package.
 func trapInstance(logger *slog.Logger) {
 	terminationCh := make(chan os.Signal, 1)
 
@@ -104,4 +118,25 @@ func trapInstance(logger *slog.Logger) {
 	<-terminationCh
 
 	logger.Info("initiating shutdown")
+}
+
+// contextRetry waits for the context to be done or the timeout to be reached.
+func contextRetry(ctx context.Context) {
+	tc := time.NewTimer(_retryTimeout)
+	defer func() {
+		tc.Stop()
+
+		// This ensures that on context cancellation we drain the
+		// channel in case it is not empty.
+		// See: https://github.com/golang/go/issues/27169
+		select {
+		case <-tc.C:
+		default:
+		}
+	}()
+
+	select {
+	case <-tc.C:
+	case <-ctx.Done():
+	}
 }

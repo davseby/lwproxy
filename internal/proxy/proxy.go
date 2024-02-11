@@ -50,13 +50,14 @@ type Config struct {
 	Addr string `default:":8081"`
 
 	// MaxBytes is the maximum amount of bytes that can be used.
+	// The default value is 2GB.
 	MaxBytes int64 `default:"2000000000"`
 
 	Auth struct {
-		// Username is the username for basic authentication.
+		// Username is the username used for basic authentication.
 		Username string `default:"admin"`
 
-		// Password is the password for basic authentication.
+		// Password is the password used for basic authentication.
 		Password string `default:"admin"`
 	}
 }
@@ -98,6 +99,8 @@ func NewProxy(
 // ListenAndServe listens for and serves connections. It blocks until the
 // context is done or server listening procedure returns an error.
 func (p *Proxy) ListenAndServe(ctx context.Context) {
+	p.log.Info("starting serving")
+
 	// NOTE: By having stop channel we can retry opening a server in case
 	// the Serve method fails.
 	stopCh := make(chan struct{})
@@ -130,7 +133,7 @@ func (p *Proxy) ListenAndServe(ctx context.Context) {
 
 		err := p.srv.Shutdown(closureCtx) //nolint: contextcheck // we cannot use base context here as it is already cancelled and we want to give time for a shutdown.
 		if err != nil {
-			p.silentError(err, "shutting down server")
+			p.silentError(err, "shutting server down")
 		}
 
 		<-stopCh
@@ -158,10 +161,11 @@ func (p *Proxy) recordHandler(w http.ResponseWriter, r *http.Request) {
 	// This could be done in a separate goroutine to avoid blocking the
 	// request handling as we don't know what will be done in the publish
 	// method. However, in that case we should track the number
-	// of spinned go routines and keep a limit on them. Other solution
-	// could be to use a buffered channel communication. In case we publish
-	// directly to a message broker, we should be able to avoid these
-	// problems, except for the error handling.
+	// of spinned go routines and keep a limit on them.
+	// Another solution could be to use a buffered channel communication.
+	// In case we publish directly to a message broker, we should be able
+	// to avoid these problems as most broker APIs are suitable for
+	// concurrent use.
 	if err := p.rec.Handle(request.NewRecord(r.Host)); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -170,7 +174,7 @@ func (p *Proxy) recordHandler(w http.ResponseWriter, r *http.Request) {
 	p.deadlineHandler(w, r)
 }
 
-// deadlineHandler appends a deadline to the request.
+// deadlineHandler appends a deadline to the requests context.
 func (p *Proxy) deadlineHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithDeadline(
 		r.Context(),
@@ -182,9 +186,16 @@ func (p *Proxy) deadlineHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // auth handles proxy authentication checking.
-func (p *Proxy) auth(header string) bool {
-	bkey := strings.SplitN(header, " ", 2)
+func (p *Proxy) auth(value string) bool {
+	if value == "" {
+		p.log.Debug("missing proxy-authorization header")
+		return false
+	}
+
+	bkey := strings.SplitN(value, " ", 2)
 	if bkey[0] != "Basic" {
+		p.log.Debug("invalid missing proxy-authorization header")
+
 		return false
 	}
 
@@ -197,6 +208,12 @@ func (p *Proxy) auth(header string) bool {
 
 	parts := strings.SplitN(string(key), ":", 2)
 	if len(parts) != 2 || p.cfg.Auth.Username != parts[0] || p.cfg.Auth.Password != parts[1] {
+		p.log.Debug(
+			"invalid basic auth credentials",
+			slog.String("username", parts[0]),
+			slog.String("password", parts[1]),
+		)
+
 		return false
 	}
 

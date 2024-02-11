@@ -100,9 +100,9 @@ func (nbl *NoopBytesLimiter) UseBytes(_ int64) error {
 
 // DB is an interface for a database communication.
 type DB interface {
-	// FetchBytes returns the amount of bytes used.
+	// FetchBytes should return the amount of bytes used.
 	FetchBytes(ctx context.Context) (int64, error)
 
-	// IncreaseBytes increases the amount of bytes used.
+	// IncreaseBytes should increase the amount of bytes used.
 	IncreaseBytes(ctx context.Context, usedBytes int64) error
 }

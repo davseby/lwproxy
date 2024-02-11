@@ -9,7 +9,7 @@ import (
 	"github.com/rs/xid"
 )
 
-// Record is a record of a request.
+// Record contains relevant information about the proxy requests.
 type Record struct {
 	// ID is the unique identifier of the request.
 	ID xid.ID

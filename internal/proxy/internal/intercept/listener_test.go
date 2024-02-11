@@ -210,7 +210,7 @@ func Test_Listener_Accept(t *testing.T) {
 				},
 			}
 		}(),
-		"Rejected a connection due to limits breach": func() tcase {
+		"Successfully rejected a connection due to the limits breach": func() tcase {
 			cm := stubConn(nil, nil)
 			lim := stubBytesLimiter(false, nil)
 
@@ -360,7 +360,7 @@ func Test_Conn_Read(t *testing.T) {
 				wasBytesLimiterUseBytesCalled(true, 0),
 			},
 		},
-		"Successfully read from connection": {
+		"Successfully read from a connection": {
 			Conn:    stubConn(3, nil),
 			Limiter: stubBytesLimiter(nil),
 			Size:    3,
@@ -456,7 +456,7 @@ func Test_Conn_Write(t *testing.T) {
 				wasBytesLimiterUseBytesCalled(true, 0),
 			},
 		},
-		"Successfully read from connection": {
+		"Successfully read from a connection": {
 			Conn:    stubConn(3, nil),
 			Limiter: stubBytesLimiter(nil),
 			Size:    3,

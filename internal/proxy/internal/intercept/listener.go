@@ -1,13 +1,13 @@
 // package intercept provides a way to intercept the read and write calls
 // to a connection and checks the bytes used, potentially invalidating the
-// connection using a control point.
+// connection.
 //
 //go:generate moq --stub -out 0moq_test.go . BytesLimiter:BytesLimiterMock conn:connMock listener:listenerMock
 package intercept
 
 import (
 	"bytes"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -26,7 +26,7 @@ type Listener struct {
 	limiter BytesLimiter
 }
 
-// NewListener intercepts the listen call.
+// NewListener creates a new intercept listener.
 func NewListener(
 	log *slog.Logger,
 	addr string,
@@ -45,7 +45,7 @@ func NewListener(
 }
 
 // Accept waits for and returns the next connection to the listener. It
-// intercepts the accept call.
+// creates an intercepted connection and checks the bytes limit.
 func (l *Listener) Accept() (net.Conn, error) {
 	conn, err := l.listener.Accept()
 	if err != nil {
@@ -56,26 +56,29 @@ func (l *Listener) Accept() (net.Conn, error) {
 
 	switch {
 	case err != nil:
-		l.log.Error("failed to check bytes", "error", err)
-
-		// internalErrorResponse is the response to send when server
-		// receives an internal error.
 		var internalErrorResponse = http.Response{
-			StatusCode: http.StatusPaymentRequired,
+			StatusCode: http.StatusInternalServerError,
 			ProtoMajor: 1,
 			ProtoMinor: 1,
 			Header: http.Header{
 				"Content-Type": {"text/plain; charset=utf-8"},
 			},
-			Body:          ioutil.NopCloser(bytes.NewBuffer([]byte(_bytesLimitExceeded))),
-			ContentLength: int64(len(_bytesLimitExceeded)),
+			Body: io.NopCloser(
+				bytes.NewBufferString(
+					strings.ToLower(
+						http.StatusText(http.StatusInternalServerError),
+					),
+				),
+			),
+			ContentLength: int64(len(http.StatusText(http.StatusInternalServerError))),
 		}
 
 		if err := internalErrorResponse.Write(conn); err != nil {
 			l.log.Error("failed to write internal error response", "error", err)
 		}
+
+		l.log.Error("failed to check bytes", "error", err)
 	case !ok:
-		// exceededLimitResponse is the response to send when the limit is exceeded.
 		var exceededLimitResponse = http.Response{
 			StatusCode: http.StatusPaymentRequired,
 			ProtoMajor: 1,
@@ -83,14 +86,8 @@ func (l *Listener) Accept() (net.Conn, error) {
 			Header: http.Header{
 				"Content-Type": {"text/plain; charset=utf-8"},
 			},
-			Body: ioutil.NopCloser(
-				bytes.NewBuffer(
-					[]byte(strings.ToLower(
-						http.StatusText(http.StatusInternalServerError),
-					)),
-				),
-			),
-			ContentLength: int64(len(http.StatusText(http.StatusInternalServerError))),
+			Body:          io.NopCloser(bytes.NewBufferString(_bytesLimitExceeded)),
+			ContentLength: int64(len(_bytesLimitExceeded)),
 		}
 
 		if err := exceededLimitResponse.Write(conn); err != nil {
@@ -116,15 +113,15 @@ func (l *Listener) Accept() (net.Conn, error) {
 	}, nil
 }
 
-// Conn is an intercepted connection. It tracks the bytes written
-// and read from the connection.
+// Conn is an intercepted connection.
 type Conn struct {
 	conn
 
 	limiter BytesLimiter
 }
 
-// Read reads data from the connection. It intercepts the read call.
+// Read reads data from the connection and uses the bytes limiter to
+// increase the bytes used.
 func (c *Conn) Read(b []byte) (int, error) {
 	n, err := c.conn.Read(b)
 	if err != nil {
@@ -133,10 +130,10 @@ func (c *Conn) Read(b []byte) (int, error) {
 
 	// NOTE: We could probably move this to a separate routine where a
 	// buffered channel is used to send the number of bytes read. This
-	// would allow us to avoid the lock  increasing the write and read
+	// would allow us to avoid the lock increasing the write and read
 	// performance, however we risk using too much data and exceeding the
 	// limit. Depending on the project requirements, this could be
-	// adjusted to meet them
+	// adjusted to meet them.
 	if err := c.limiter.UseBytes(int64(n)); err != nil {
 		return 0, err
 	}
@@ -144,7 +141,8 @@ func (c *Conn) Read(b []byte) (int, error) {
 	return n, nil
 }
 
-// Write writes data to the connection. It intercepts the write call.
+// Write writes data to the connection and uses the bytes limiter to
+// increase the bytes used.
 func (c *Conn) Write(b []byte) (int, error) {
 	n, err := c.conn.Write(b)
 	if err != nil {
@@ -165,7 +163,8 @@ type BytesLimiter interface {
 	// CheckBytes should check if the bytes limit is exceeded.
 	CheckBytes() (bool, error)
 
-	// UsedBytes should use the provided number of bytes.
+	// UsedBytes should use the provided number of bytes. If the limit is
+	// exceeded, an error should be returned.
 	UseBytes(n int64) error
 }
 
