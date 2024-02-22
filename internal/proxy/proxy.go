@@ -157,15 +157,6 @@ func (p *Proxy) authHandler(w http.ResponseWriter, r *http.Request) {
 // recordHandler creates a new request record and publishes it to the
 // recorder.
 func (p *Proxy) recordHandler(w http.ResponseWriter, r *http.Request) {
-	// NOTE: We publish a request record before handling the request.
-	// This could be done in a separate goroutine to avoid blocking the
-	// request handling as we don't know what will be done in the publish
-	// method. However, in that case we should track the number
-	// of spinned go routines and keep a limit on them.
-	// Another solution could be to use a buffered channel communication.
-	// In case we publish directly to a message broker, we should be able
-	// to avoid these problems as most broker APIs are suitable for
-	// concurrent use.
 	if err := p.rec.Handle(request.NewRecord(r.Host)); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

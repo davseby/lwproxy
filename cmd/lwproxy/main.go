@@ -108,8 +108,6 @@ func startServices(log *slog.Logger, cfg Config) (func(), error) {
 }
 
 // trapInstance blocks until a termination signal is received.
-// NOTE: For a mono-repo setup we could move the trapInstance and
-// contextRetry functions to a separate internal package.
 func trapInstance(logger *slog.Logger) {
 	terminationCh := make(chan os.Signal, 1)
 

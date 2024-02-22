@@ -128,12 +128,6 @@ func (c *Conn) Read(b []byte) (int, error) {
 		return 0, err
 	}
 
-	// NOTE: We could probably move this to a separate routine where a
-	// buffered channel is used to send the number of bytes read. This
-	// would allow us to avoid the lock increasing the write and read
-	// performance, however we risk using too much data and exceeding the
-	// limit. Depending on the project requirements, this could be
-	// adjusted to meet them.
 	if err := c.limiter.UseBytes(int64(n)); err != nil {
 		return 0, err
 	}
@@ -149,7 +143,6 @@ func (c *Conn) Write(b []byte) (int, error) {
 		return 0, err
 	}
 
-	// NOTE: Comment applies same as for the read.
 	if err := c.limiter.UseBytes(int64(n)); err != nil {
 		return 0, err
 	}
